@@ -1,0 +1,4 @@
+# No third-party packages are needed.
+# Everything used (tkinter, multiprocessing, pathlib, re, collections, datetime,
+# threading, queue, unittest) is part of the Python 3 standard library.
+# Tested with Python 3.13 on Windows.
