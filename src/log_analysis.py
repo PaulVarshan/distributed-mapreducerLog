@@ -33,6 +33,27 @@ LINE_PATTERN = re.compile(
     r"(?P<message>.*)$"                   # rest of the line
 )
 
+# Known error types. If a message CONTAINS the phrase on the left,
+# it is grouped under that phrase. Order matters: first match wins.
+KNOWN_ERROR_TYPES = [
+    "File does not exist",
+    "Directory index forbidden by rule",
+    "script not found or unable to stat",
+    "mod_jk child workerEnv in error state",
+    "mod_jk child init",
+    "Can't find child",
+    "Factory error creating",
+    "Can't create",
+    "request failed: URI too long",
+    "request failed: error reading the headers",
+    "attempt to invoke directory as script",
+    "Attempt to serve directory",
+    "Invalid URI in request",
+    "Invalid method in request",
+    "client sent HTTP/1.1 request without hostname",
+    "uri must start with /",
+    "mod_security: Access denied",
+]
 
 # Keys used for the intermediate (key, value) pairs.
 LEVEL = "LEVEL"
@@ -57,6 +78,21 @@ def parse_log_line(line):
         "client_ip": match.group("ip"),        # None if the line has no [client ...]
         "message": match.group("message"),
     }
+
+
+def classify_error(message):
+    """Turn a raw error message into a stable error type.
+
+    'Directory index forbidden by rule: /var/www/html/' -> 'Directory index forbidden by rule'
+    """
+    for error_type in KNOWN_ERROR_TYPES:
+        if error_type in message:
+            return error_type
+    # Unknown message: keep the text before the first ':' and hide numbers,
+    # so values like process IDs do not create thousands of "different" errors.
+    cleaned = message.split(":")[0]
+    cleaned = re.sub(r"\d+", "N", cleaned)
+    return cleaned.strip() or "Unknown error"
 
 
 def timestamp_to_date(timestamp):
