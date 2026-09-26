@@ -108,3 +108,51 @@ def read_records(input_file):
     """Read the log file and return a list of lines (one record per line)."""
     with open(input_file, "r", encoding="utf-8", errors="replace") as f:
         return [line.rstrip("\n") for line in f if line.strip()]
+
+
+def split_records(records, num_workers):
+    """Split records into num_workers chunks of almost equal size.
+
+    Example: 10 records, 3 workers -> chunk sizes 4, 3, 3
+    """
+    if num_workers < 1:
+        raise ValueError("num_workers must be at least 1")
+    chunk_size, remainder = divmod(len(records), num_workers)
+    chunks = []
+    start = 0
+    for i in range(num_workers):
+        # The first `remainder` chunks get one extra record.
+        end = start + chunk_size + (1 if i < remainder else 0)
+        chunks.append(records[start:end])
+        start = end
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# 3. MAP
+# ---------------------------------------------------------------------------
+
+def map_logs(records):
+    """MAP: turn each record into (key, 1) pairs.
+
+    A key is a tuple (category, value), e.g.
+        (("LEVEL", "error"), 1)
+        (("ERROR_TYPE", "Directory index forbidden by rule"), 1)
+        (("CLIENT_IP", "61.155.76.2"), 1)
+    """
+    pairs = []
+    for line in records:
+        parsed = parse_log_line(line)
+        if parsed is None:
+            pairs.append(((RECORD, "malformed"), 1))
+            continue
+
+        pairs.append(((RECORD, "parsed"), 1))
+        pairs.append(((LEVEL, parsed["level"]), 1))
+
+        if parsed["level"] == "error":
+            pairs.append(((ERROR_TYPE, classify_error(parsed["message"])), 1))
+            pairs.append(((ERROR_DATE, timestamp_to_date(parsed["timestamp"])), 1))
+            if parsed["client_ip"]:
+                pairs.append(((CLIENT_IP, parsed["client_ip"]), 1))
+    return pairs

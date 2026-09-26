@@ -72,5 +72,22 @@ class TestClassifyError(unittest.TestCase):
         self.assertEqual(la.classify_error("something odd 1234: detail"), "something odd N")
 
 
+class TestSplit(unittest.TestCase):
+    def test_split_even_sizes(self):
+        chunks = la.split_records(list(range(10)), 3)
+        self.assertEqual([len(c) for c in chunks], [4, 3, 3])
+
+    def test_split_keeps_all_records_in_order(self):
+        records = list(range(101))
+        for n in (1, 2, 3, 4):
+            chunks = la.split_records(records, n)
+            self.assertEqual(len(chunks), n)
+            self.assertEqual([r for c in chunks for r in c], records)
+
+    def test_split_invalid_workers(self):
+        with self.assertRaises(ValueError):
+            la.split_records([1, 2], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
