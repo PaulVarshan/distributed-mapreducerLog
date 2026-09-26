@@ -156,3 +156,47 @@ def map_logs(records):
             if parsed["client_ip"]:
                 pairs.append(((CLIENT_IP, parsed["client_ip"]), 1))
     return pairs
+
+
+def worker(worker_id, records, result_queue):
+    """Runs inside a separate process: MAP one chunk and send the result back."""
+    start = time.perf_counter()
+    pairs = map_logs(records)
+    result_queue.put({
+        "worker_id": worker_id,
+        "pid": os.getpid(),
+        "records": len(records),
+        "pairs": pairs,
+        "map_time": time.perf_counter() - start,
+    })
+
+
+# ---------------------------------------------------------------------------
+# 4. SHUFFLE and 5. REDUCE
+# ---------------------------------------------------------------------------
+
+def shuffle(all_pairs):
+    """SHUFFLE / GROUP: collect all values for the same key.
+
+    [(("LEVEL","error"),1), (("LEVEL","error"),1)]  ->  {("LEVEL","error"): [1, 1]}
+    """
+    groups = defaultdict(list)
+    for key, value in all_pairs:
+        groups[key].append(value)
+    return groups
+
+
+def reduce_counts(groups):
+    """REDUCE: sum the values of each key.
+
+    {("LEVEL","error"): [1, 1, 1]}  ->  {"LEVEL": {"error": 3}}
+    """
+    results = defaultdict(dict)
+    for (category, value), ones in groups.items():
+        results[category][value] = sum(ones)
+    return results
+
+
+def sort_counts(counts):
+    """Sort a {name: count} dict by count, highest first."""
+    return sorted(counts.items(), key=lambda x: x[1], reverse=True)
