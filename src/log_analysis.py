@@ -200,3 +200,116 @@ def reduce_counts(groups):
 def sort_counts(counts):
     """Sort a {name: count} dict by count, highest first."""
     return sorted(counts.items(), key=lambda x: x[1], reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# 6. Driver (the "master" / coordinator)
+# ---------------------------------------------------------------------------
+
+def run_mapreduce(input_file=DEFAULT_INPUT_FILE, num_workers=3, progress=None):
+    """Run the whole MapReduce job and return a dict of results.
+
+    progress: optional function called with short status messages
+              (the UI uses it to show worker activity while the job runs).
+    """
+    def report(event, **info):
+        if progress:
+            progress(event, info)
+
+    start_time = time.perf_counter()
+
+    # READ INPUT
+    records = read_records(input_file)
+    report("read", total=len(records))
+
+    # SPLIT
+    chunks = split_records(records, num_workers)
+    report("split", chunk_sizes=[len(c) for c in chunks])
+
+    # MAP - one process per chunk
+    result_queue = Queue()
+    processes = []
+    for worker_id, chunk in enumerate(chunks, start=1):
+        p = Process(target=worker, args=(worker_id, chunk, result_queue))
+        p.start()
+        processes.append(p)
+        report("worker_started", worker_id=worker_id, pid=p.pid, records=len(chunk))
+
+    # Collect results BEFORE join(), otherwise a full queue can block a worker.
+    worker_results = []
+    for _ in processes:
+        result = result_queue.get()
+        worker_results.append(result)
+        report("worker_done", worker_id=result["worker_id"], pid=result["pid"],
+               records=result["records"], pairs=len(result["pairs"]),
+               map_time=result["map_time"])
+    for p in processes:
+        p.join()
+
+    failed = [i + 1 for i, p in enumerate(processes) if p.exitcode != 0]
+    if failed:
+        raise RuntimeError(f"Worker(s) {failed} failed")
+
+    # SHUFFLE - combine the intermediate pairs of all workers
+    worker_results.sort(key=lambda r: r["worker_id"])
+    all_pairs = []
+    for result in worker_results:
+        all_pairs.extend(result["pairs"])
+    groups = shuffle(all_pairs)
+    report("shuffle", keys=len(groups), pairs=len(all_pairs))
+
+    # REDUCE
+    reduced = reduce_counts(groups)
+    report("reduce")
+
+    elapsed = time.perf_counter() - start_time
+
+    return {
+        "input_file": str(input_file),
+        "num_workers": num_workers,
+        "total_records": len(records),
+        "parsed_records": reduced[RECORD].get("parsed", 0),
+        "malformed_records": reduced[RECORD].get("malformed", 0),
+        "level_counts": reduced[LEVEL],
+        "error_counts": reduced[ERROR_TYPE],
+        "ip_counts": reduced[CLIENT_IP],
+        "date_counts": reduced[ERROR_DATE],
+        "chunks": [len(c) for c in chunks],
+        "worker_info": [
+            {"worker_id": r["worker_id"], "pid": r["pid"], "records": r["records"],
+             "pairs": len(r["pairs"]), "map_time": r["map_time"], "status": "Completed"}
+            for r in worker_results
+        ],
+        "intermediate_pairs": len(all_pairs),
+        "elapsed_time": elapsed,
+    }
+
+
+def print_results(results, top=10):
+    print(f"Workers: {results['num_workers']}   chunks: {results['chunks']}")
+    print(f"Total records: {results['total_records']}  "
+          f"(parsed {results['parsed_records']}, malformed {results['malformed_records']})")
+    print("\nLog levels:")
+    for name, count in sort_counts(results["level_counts"]):
+        print(f"  {name:<10} {count}")
+    print(f"\nTop {top} error types:")
+    for name, count in sort_counts(results["error_counts"])[:top]:
+        print(f"  {name:<45} {count}")
+    print(f"\nTop {top} client IPs (error records):")
+    for name, count in sort_counts(results["ip_counts"])[:top]:
+        print(f"  {name:<18} {count}")
+    print(f"\nExecution time: {results['elapsed_time']:.4f} seconds")
+
+
+if __name__ == "__main__":
+    # Command-line demo: run with 1, 2 and 4 workers and compare.
+    runs = {}
+    for n in (1, 2, 4):
+        runs[n] = run_mapreduce(DEFAULT_INPUT_FILE, n)
+    print_results(runs[4])
+    print("\nWorkers | Execution time (s)")
+    for n, r in runs.items():
+        print(f"{n:>7} | {r['elapsed_time']:.4f}")
+    keys = ("level_counts", "error_counts", "ip_counts", "date_counts", "parsed_records")
+    same = all(runs[n][k] == runs[1][k] for n in runs for k in keys)
+    print("Results identical for all worker counts:", same)
