@@ -153,6 +153,56 @@ class AnalyzerApp:
         scroll.pack(side="right", fill="y")
         return table
 
+    # ---------------------------------------------------------------- pipeline
+    def draw_pipeline(self, num_workers, states=None, worker_states=None):
+        """Draw INPUT -> SPLIT -> MAP (N workers) -> SHUFFLE -> REDUCE -> RESULT."""
+        states = states or {}
+        worker_states = worker_states or {}
+        self.pipeline_states = states
+        self.worker_states = worker_states
+        self.pipeline_workers = num_workers
+
+        c = self.canvas
+        c.delete("all")
+        width = c.winfo_width() if c.winfo_width() > 1 else 1000
+        step = width / len(PIPELINE_STAGES)
+        box_w, box_h, y = min(110, step - 30), 30, 12
+        centers = []
+        for i, stage in enumerate(PIPELINE_STAGES):
+            x = step * i + step / 2
+            centers.append(x)
+            color = {"active": COLOR_ACTIVE, "done": COLOR_DONE}.get(states.get(stage), COLOR_PENDING)
+            c.create_rectangle(x - box_w / 2, y, x + box_w / 2, y + box_h, fill=color, outline="#555")
+            c.create_text(x, y + box_h / 2, text=stage, font=("Segoe UI", 10, "bold"))
+            if i > 0:
+                c.create_line(centers[i - 1] + box_w / 2, y + box_h / 2, x - box_w / 2, y + box_h / 2,
+                              arrow="last", width=2)
+
+        # Worker boxes under MAP
+        map_x = centers[PIPELINE_STAGES.index("MAP")]
+        wy = y + box_h + 25
+        wbox = min(100, step * 2 / num_workers - 10)
+        gap = 10
+        total = num_workers * wbox + (num_workers - 1) * gap
+        left = map_x - total / 2
+        for w in range(1, num_workers + 1):
+            x0 = left + (w - 1) * (wbox + gap)
+            color = {"running": COLOR_ACTIVE, "done": COLOR_DONE}.get(worker_states.get(w), COLOR_PENDING)
+            c.create_line(map_x, y + box_h, x0 + wbox / 2, wy, fill="#888")
+            c.create_rectangle(x0, wy, x0 + wbox, wy + 36, fill=color, outline="#555")
+            c.create_text(x0 + wbox / 2, wy + 18, text=f"Worker {w}\n(process)", justify="center",
+                          font=("Segoe UI", 9))
+        c.create_text(10, 120, anchor="w", fill="#555", font=("Segoe UI", 9),
+                      text="grey = waiting     yellow = running     green = completed")
+
+    def set_stage(self, stage, state):
+        self.pipeline_states[stage] = state
+        self.draw_pipeline(self.pipeline_workers, self.pipeline_states, self.worker_states)
+
+    def set_worker(self, worker_id, state):
+        self.worker_states[worker_id] = state
+        self.draw_pipeline(self.pipeline_workers, self.pipeline_states, self.worker_states)
+
     # ----------------------------------------------------------------- actions
     def browse(self):
         path = filedialog.askopenfilename(
