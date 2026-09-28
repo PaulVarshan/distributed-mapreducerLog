@@ -89,5 +89,60 @@ class TestSplit(unittest.TestCase):
             la.split_records([1, 2], 0)
 
 
+class TestMapShuffleReduce(unittest.TestCase):
+    def test_map_emits_pairs(self):
+        pairs = la.map_logs([ERROR_LINE])
+        self.assertIn((("LEVEL", "error"), 1), pairs)
+        self.assertIn((("ERROR_TYPE", "Directory index forbidden by rule"), 1), pairs)
+        self.assertIn((("CLIENT_IP", "61.155.76.2"), 1), pairs)
+        self.assertIn((("ERROR_DATE", "2005-11-27"), 1), pairs)
+
+    def test_notice_emits_only_level(self):
+        pairs = la.map_logs([NOTICE_LINE])
+        self.assertEqual(pairs, [(("RECORD", "parsed"), 1), (("LEVEL", "notice"), 1)])
+
+    def test_shuffle_groups_by_key(self):
+        pairs = [(("LEVEL", "error"), 1), (("LEVEL", "notice"), 1), (("LEVEL", "error"), 1)]
+        groups = la.shuffle(pairs)
+        self.assertEqual(groups[("LEVEL", "error")], [1, 1])
+        self.assertEqual(groups[("LEVEL", "notice")], [1])
+
+    def test_reduce_sums(self):
+        groups = {("LEVEL", "error"): [1, 1, 1], ("CLIENT_IP", "61.155.76.2"): [1, 1, 1, 1]}
+        reduced = la.reduce_counts(groups)
+        self.assertEqual(reduced["LEVEL"]["error"], 3)
+        self.assertEqual(reduced["CLIENT_IP"]["61.155.76.2"], 4)
+
+
+class TestRunMapReduce(unittest.TestCase):
+    """End-to-end with real worker processes on a tiny temporary file."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8")
+        self.tmp.write("\n".join(SAMPLE))
+        self.tmp.close()
+        self.path = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.path.unlink()
+
+    def test_counts_and_consistency_across_workers(self):
+        first = None
+        for n in (1, 2, 4):
+            r = la.run_mapreduce(self.path, n)
+            self.assertEqual(r["total_records"], 7)
+            self.assertEqual(r["parsed_records"] + r["malformed_records"], 7)
+            self.assertEqual(sum(r["chunks"]), 7)
+            self.assertEqual(len(r["worker_info"]), n)
+            self.assertEqual(r["level_counts"], {"error": 4, "notice": 1, "warn": 1})
+            self.assertEqual(r["error_counts"]["File does not exist"], 2)
+            self.assertEqual(r["ip_counts"], {"61.155.76.2": 2, "10.0.0.1": 1})
+            self.assertEqual(r["date_counts"], {"2005-11-27": 2, "2005-06-09": 1, "2005-11-28": 1})
+            if first is None:
+                first = r
+            for key in ("level_counts", "error_counts", "ip_counts", "date_counts"):
+                self.assertEqual(r[key], first[key])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
