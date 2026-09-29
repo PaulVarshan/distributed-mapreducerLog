@@ -233,6 +233,145 @@ class AnalyzerApp:
             return None
         return path
 
+    def run_analysis(self):
+        path = self.check_input()
+        if path:
+            self.start_job([int(self.workers_var.get())], path)
+
+    def run_comparison(self):
+        path = self.check_input()
+        if path:
+            self.start_job([1, 2, 4], path)
+
+    def start_job(self, worker_counts, path):
+        """Run one or more MapReduce jobs in a background thread."""
+        self.running = True
+        self.run_button.state(["disabled"])
+        self.compare_button.state(["disabled"])
+        self.comparison = {}
+
+        def job():
+            try:
+                for n in worker_counts:
+                    self.events.put(("job_start", {"workers": n}))
+                    results = la.run_mapreduce(
+                        path, n, progress=lambda event, info: self.events.put((event, info)))
+                    self.events.put(("job_done", {"results": results}))
+                self.events.put(("all_done", {"worker_counts": worker_counts}))
+            except Exception as exc:          # show the error in the UI instead of crashing
+                self.events.put(("failed", {"error": str(exc)}))
+
+        threading.Thread(target=job, daemon=True).start()
+
+    # --------------------------------------------------- progress from the job
+    def poll_events(self):
+        try:
+            while True:
+                event, info = self.events.get_nowait()
+                self.handle_event(event, info)
+        except queue.Empty:
+            pass
+        self.root.after(50, self.poll_events)
+
+    def handle_event(self, event, info):
+        if event == "job_start":
+            n = info["workers"]
+            self.workers_var.set(str(n))
+            for table in (self.chunk_table, self.worker_table):
+                table.delete(*table.get_children())
+            self.worker_rows = {}
+            self.draw_pipeline(n, {"INPUT": "active"})
+            self.status_var.set(f"Status: Reading input ({n} worker(s))...")
+
+        elif event == "read":
+            self.set_stage("INPUT", "done")
+            self.set_stage("SPLIT", "active")
+            self.records_var.set(f"Records processed: {info['total']:,}")
+
+        elif event == "split":
+            for i, size in enumerate(info["chunk_sizes"], start=1):
+                self.chunk_table.insert("", "end", values=(f"Chunk {i}", f"{size:,}"))
+            self.set_stage("SPLIT", "done")
+            self.set_stage("MAP", "active")
+            self.status_var.set("Status: Map running in worker processes...")
+
+        elif event == "worker_started":
+            w = info["worker_id"]
+            self.worker_rows[w] = self.worker_table.insert(
+                "", "end", values=(w, info["pid"], f"{info['records']:,}", "-", "-", "Running"))
+            self.set_worker(w, "running")
+
+        elif event == "worker_done":
+            w = info["worker_id"]
+            self.worker_table.item(self.worker_rows[w], values=(
+                w, info["pid"], f"{info['records']:,}", f"{info['pairs']:,}",
+                f"{info['map_time']:.3f}", "Completed"))
+            self.set_worker(w, "done")
+
+        elif event == "shuffle":
+            self.set_stage("MAP", "done")
+            self.set_stage("SHUFFLE", "done")
+            self.set_stage("REDUCE", "active")
+            self.status_var.set(f"Status: Shuffled {info['pairs']:,} pairs into {info['keys']:,} keys, reducing...")
+
+        elif event == "reduce":
+            self.set_stage("REDUCE", "done")
+
+        elif event == "job_done":
+            results = info["results"]
+            self.comparison[results["num_workers"]] = results
+            self.set_stage("RESULT", "done")
+            self.show_results(results)
+
+        elif event == "all_done":
+            self.running = False
+            self.run_button.state(["!disabled"])
+            self.compare_button.state(["!disabled"])
+            if len(info["worker_counts"]) > 1:
+                self.show_comparison()
+
+        elif event == "failed":
+            self.running = False
+            self.run_button.state(["!disabled"])
+            self.compare_button.state(["!disabled"])
+            self.status_var.set("Status: FAILED")
+            messagebox.showerror("MapReduce failed", info["error"])
+
+    def show_results(self, r):
+        self.status_var.set(f"Status: Analysis completed ({r['num_workers']} worker(s))")
+        self.records_var.set(f"Records processed: {r['total_records']:,}  "
+                             f"(parsed {r['parsed_records']:,}, malformed {r['malformed_records']:,})")
+        self.time_var.set(f"Execution time: {r['elapsed_time']:.4f} seconds")
+        self.history_table.insert("", "end", values=(
+            r["num_workers"], f"{r['elapsed_time']:.4f}", f"{r['total_records']:,}"))
+        self.history_table.yview_moveto(1)
+
+        for table in (self.level_table, self.error_table, self.ip_table, self.date_table):
+            table.delete(*table.get_children())
+        for level, count in la.sort_counts(r["level_counts"]):
+            self.level_table.insert("", "end", values=(level, f"{count:,}"))
+        if r["malformed_records"]:
+            self.level_table.insert("", "end", values=("(malformed line, no level)",
+                                                       f"{r['malformed_records']:,}"))
+        for rank, (name, count) in enumerate(la.sort_counts(r["error_counts"])[:TOP_N], start=1):
+            self.error_table.insert("", "end", values=(rank, name, f"{count:,}"))
+        for rank, (ip, count) in enumerate(la.sort_counts(r["ip_counts"])[:TOP_N], start=1):
+            self.ip_table.insert("", "end", values=(rank, ip, f"{count:,}"))
+        for date, count in sorted(r["date_counts"].items()):
+            self.date_table.insert("", "end", values=(date, f"{count:,}"))
+
+    def show_comparison(self):
+        keys = ("level_counts", "error_counts", "ip_counts", "date_counts",
+                "parsed_records", "malformed_records")
+        runs = self.comparison
+        first = runs[min(runs)]
+        same = all(run[k] == first[k] for run in runs.values() for k in keys)
+        lines = [f"{n} worker(s): {run['elapsed_time']:.4f} s" for n, run in sorted(runs.items())]
+        lines.append("")
+        lines.append("Final counts identical for all worker counts: " + ("YES" if same else "NO"))
+        self.status_var.set("Status: Experiment completed — results identical: " + ("YES" if same else "NO"))
+        messagebox.showinfo("Experiment: workers vs execution time", "\n".join(lines))
+
 
 def main():
     root = tk.Tk()
